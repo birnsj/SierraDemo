@@ -1,0 +1,7 @@
+[gd_scene load_steps=2 format=3 uid="uid://cqp5x8rk7nh3v"]
+
+[ext_resource type="Script" path="res://Game/Rooms/Ego.cs" id="1_ego"]
+
+[node name="Ego" type="Node2D"]
+script = ExtResource("1_ego")
+MoveSpeed = 100.0

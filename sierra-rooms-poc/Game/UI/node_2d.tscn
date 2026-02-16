@@ -1,0 +1,11 @@
+[gd_scene format=3 uid="uid://rwgjbx558c0q"]
+
+[ext_resource type="PackedScene" uid="uid://b42beexik8h87" path="res://Game/UI/UIBar.tscn" id="1_2og5d"]
+
+[node name="Node2D" type="Node2D" unique_id=310504742]
+
+[node name="CanvasLayer" type="CanvasLayer" parent="." unique_id=1602833810]
+
+[node name="UiBar" parent="CanvasLayer" unique_id=2077162327 instance=ExtResource("1_2og5d")]
+texture_filter = 2
+layout_direction = 2

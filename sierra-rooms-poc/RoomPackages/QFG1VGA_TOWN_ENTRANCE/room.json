@@ -1,0 +1,97 @@
+{
+  "id": "QFG1VGA_TOWN_ENTRANCE",
+  "displayName": "QFG1 VGA - Town Entrance",
+  "baseSize": {
+    "w": 320,
+    "h": 190
+  },
+  "assets": {
+    "picBase": "pic_base_large.png",
+    "picBase1x": "pic_base_320x200.png",
+    "picBase6x": "pic_base_1920x1140.png",
+    "picBase12x": "pic_base_3840x2280.png",
+    "control": "control.png",
+    "control1x": "control_320x200.png",
+    "control6x": "control_1920x1140.png",
+    "control12x": "control_3840x2280.png",
+    "priority": "priority.png",
+    "priority1x": "priority_320x200.png",
+    "priority6x": "priority_1920x1140.png",
+    "priority12x": "priority_3840x2280.png",
+    "picUpres": null
+  },
+  "renderScale": 5.6842103,
+  "spawn": {
+    "x": 160,
+    "y": 150
+  },
+  "controlRule": {
+    "walkableIfLumaGte": 0.2,
+    "invert": false
+  },
+  "footOffsetY": 6,
+  "exits": [
+    {
+      "id": "to_stub",
+      "rect": {
+        "x": 21,
+        "y": 6,
+        "w": 45,
+        "h": 88
+      },
+      "targetRoomId": "STUB_ROOM_1",
+      "targetSpawn": {
+        "x": 280,
+        "y": 150
+      }
+    }
+  ],
+  "hotspots": [
+    {
+      "id": "wood sign",
+      "rect": {
+        "x": 244,
+        "y": 118,
+        "w": 75,
+        "h": 37
+      },
+      "verbs": {
+        "look": {
+          "type": "text",
+          "value": "Welcome to Spielburg."
+        },
+        "use": {
+          "type": "text",
+          "value": "It\u0027s just a wood sign."
+        },
+        "talk": {
+          "type": "text",
+          "value": "It doesn\u0027t answer."
+        }
+      }
+    },
+    {
+      "id": "tree",
+      "rect": {
+        "x": 266,
+        "y": 47,
+        "w": 26,
+        "h": 32
+      },
+      "verbs": {
+        "look": {
+          "type": "text",
+          "value": "1."
+        },
+        "use": {
+          "type": "text",
+          "value": "2."
+        },
+        "talk": {
+          "type": "text",
+          "value": "3."
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,34 @@
+{
+  "id": "STUB_ROOM_1",
+  "displayName": "Stub Room 1",
+  "baseSize": { "w": 320, "h": 190 },
+
+  "assets": {
+    "picBase": "pic_base.png",
+    "control": "control.png",
+    "priority": "priority.png",
+    "picUpres": null
+  },
+
+  "renderScale": 2.0,
+
+  "spawn": { "x": 280, "y": 150 },
+
+  "controlRule": {
+    "walkableIfLumaGte": 0.5,
+    "invert": false
+  },
+
+  "footOffsetY": 6,
+
+  "exits": [
+    {
+      "id": "back_to_entrance",
+      "rect": { "x": 295, "y": 120, "w": 25, "h": 70 },
+      "targetRoomId": "QFG1VGA_TOWN_ENTRANCE",
+      "targetSpawn": { "x": 40, "y": 150 }
+    }
+  ],
+  
+  "hotspots": []
+}

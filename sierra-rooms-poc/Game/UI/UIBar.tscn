@@ -1,0 +1,11 @@
+[gd_scene load_steps=2 format=3 uid="uid://c5x8jm3qwk7pq"]
+
+[ext_resource type="Script" path="res://Game/UI/UIBar.cs" id="1_uibar"]
+
+[node name="UIBar" type="Control"]
+layout_mode = 3
+anchors_preset = 10
+anchor_right = 1.0
+offset_bottom = 10.0
+grow_horizontal = 2
+script = ExtResource("1_uibar")

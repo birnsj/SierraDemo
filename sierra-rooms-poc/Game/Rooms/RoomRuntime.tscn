@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3 uid="uid://bx3n5m8qvwk2f"]
+
+[ext_resource type="Script" path="res://Game/Rooms/RoomRuntime.cs" id="1_room"]
+
+[node name="RoomRuntime" type="Node2D"]
+script = ExtResource("1_room")
