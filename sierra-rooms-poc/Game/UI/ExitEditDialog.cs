@@ -15,6 +15,7 @@ public partial class ExitEditDialog : CanvasLayer
     private Button _cancelButton;
     private Action<string, string, string, string> _onConfirm;
     private bool _isVisible = false;
+    public bool IsVisible => _isVisible;
 
     private const float Pad = 20f;
     private const float ContentWidth = 560f;

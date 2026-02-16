@@ -10,9 +10,10 @@ public partial class DebugOverlay : CanvasLayer
     private bool _textVisible = false; // Default off; F1 toggles
 
     private const float Pad = 16f;
-    private const float TextTopPad = 24f; // Extra top padding so text doesn't overlap panel border
-    private const int FontSize = 33;   // 3x (was 11)
-    private const float LineHeight = 42f; // 3x (was 14)
+    private const float TopOffset = 10f; // Move panel down so not cut off at top
+    private const float TextTopPad = 24f;
+    private const int FontSize = 28;   // Match F4 instruction font size (2x larger)
+    private const float LineHeight = 36f;
 
     public override void _Ready()
     {
@@ -95,9 +96,9 @@ public partial class DebugOverlay : CanvasLayer
 
         Vector2 viewport = _drawNode.GetViewport().GetVisibleRect().Size;
         float x = Pad;
-        float y = Pad;
+        float y = Pad + TopOffset;
         if (x + boxWidth > viewport.X - Pad) x = Mathf.Max(Pad, viewport.X - boxWidth - Pad);
-        if (y + boxHeight > viewport.Y - Pad) y = Mathf.Max(Pad, viewport.Y - boxHeight - Pad);
+        if (y + boxHeight > viewport.Y - Pad) y = Mathf.Max(Pad + TopOffset, viewport.Y - boxHeight - Pad);
         var panelRect = new Rect2(x, y, boxWidth, boxHeight);
 
         _drawNode.DrawRect(panelRect, new Color(0.08f, 0.08f, 0.08f, 0.92f), true);

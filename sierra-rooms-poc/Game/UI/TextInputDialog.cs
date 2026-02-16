@@ -12,6 +12,7 @@ public partial class TextInputDialog : CanvasLayer
     private Button _cancelButton;
     private Action<string> _onConfirm;
     private bool _isVisible = false;
+    public bool IsVisible => _isVisible;
 
     public override void _Ready()
     {

@@ -7,6 +7,7 @@ public partial class MessageBox : CanvasLayer
     private Panel _panel;
     private Label _messageLabel;
     private bool _isVisible = false;
+    public bool IsVisible => _isVisible;
 
     public override void _Ready()
     {

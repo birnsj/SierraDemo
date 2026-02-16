@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using Godot;
 
 namespace SierraRooms.Game.Rooms;
@@ -10,9 +11,13 @@ public partial class Ego : Node2D
 
     /// <summary>Set by RoomRuntime so we can check walkability without relying on GetParent(). If null, we assume walkable.</summary>
     public Func<Vector2I, bool> IsWalkableAtBase;
+    /// <summary>When stuck near a path target, RoomRuntime can repath from current position to final target. Return true if a new path was set.</summary>
+    public Func<Vector2, Vector2, bool> OnStuckRepath;
 
-    private Vector2 _targetPositionBase; // Target in base coords
+    private Vector2 _targetPositionBase; // Current target (single or current waypoint)
+    private List<Vector2> _pathWaypoints; // When set, we follow these; target is always _pathWaypoints[0]
     private bool _hasTarget = false;
+    private Vector2 _exactBasePosition; // Smooth position for movement logic; display uses rounded pixels
     private Sprite2D _sprite;
     private AtlasTexture _atlasTexture;
     private float _renderScale = 1.0f;
@@ -26,7 +31,8 @@ public partial class Ego : Node2D
     // Direction: 0=Left, 1=Right, 2=Down, 3=Up, 4=SE, 5=SW, 6=NE, 7=NW
     private int _currentDirection = 2; // Down by default
     private int _currentFrame = 0;
-    private float _distanceMoved; // Accumulate distance to advance walk frame
+    private const float WalkAnimationFps = 10f;
+    private float _walkFrameTimer; // Advance walk frame at 10 FPS when moving
     private Vector2 _lastBasePosition; // For stuck detection
     private float _stuckTimer; // Seconds without moving toward target -> clear target
 
@@ -86,16 +92,38 @@ public partial class Ego : Node2D
         }
     }
 
+    /// <summary>Current position in base coords (smooth, used for pathfinding).</summary>
+    public Vector2 BasePosition => _exactBasePosition;
+
+    /// <summary>Set position when spawning; use this so exact base position stays in sync.</summary>
+    public void SetInitialBasePosition(Vector2 basePos)
+    {
+        _exactBasePosition = basePos;
+        float px = basePos.X * _renderScale;
+        float py = basePos.Y * _renderScale;
+        Position = new Vector2(Mathf.Round(px), Mathf.Round(py));
+    }
+
     public void SetTarget(Vector2 targetBase)
     {
+        _pathWaypoints = null;
         _targetPositionBase = targetBase;
         _hasTarget = true;
         GD.Print($"Ego.SetTarget - Base: {targetBase}, RenderScale: {_renderScale}");
     }
 
+    /// <summary>Follow path (simplified waypoints). Advance to next waypoint when passed, so direction stays stable and animation is smooth.</summary>
+    public void SetPath(List<Vector2> waypoints)
+    {
+        if (waypoints == null || waypoints.Count == 0) { _pathWaypoints = null; _hasTarget = false; return; }
+        _pathWaypoints = new List<Vector2>(waypoints);
+        _targetPositionBase = _pathWaypoints[0];
+        _hasTarget = true;
+    }
+
     private Vector2 GetBasePosition()
     {
-        return Position / _renderScale;
+        return _exactBasePosition;
     }
 
     /// <summary>True if the given base position is walkable (uses callback from RoomRuntime). Used so we don't walk through walls.</summary>
@@ -108,7 +136,11 @@ public partial class Ego : Node2D
 
     private void SetBasePosition(Vector2 basePos)
     {
-        Position = basePos * _renderScale;
+        _exactBasePosition = basePos;
+        // Snap to whole pixels for display so the sprite doesn't subpixel-jitter
+        float px = basePos.X * _renderScale;
+        float py = basePos.Y * _renderScale;
+        Position = new Vector2(Mathf.Round(px), Mathf.Round(py));
     }
 
     // Sheet layout: 0=Left, 1=Right, 2=Down, 3=Up, 4=SE, 5=SW, 6=NE, 7=NW
@@ -145,38 +177,125 @@ public partial class Ego : Node2D
             Vector2 direction = _targetPositionBase - currentBase;
             float distance = direction.Length();
 
-            if (distance < 2.0f)
+            // Path: advance waypoint when we've passed it (within radius OR closer to next) to avoid corner hang-ups and jitter
+            bool advanceWaypoint = false;
+            if (_pathWaypoints != null && _pathWaypoints.Count > 0)
+            {
+                float distToCurrent = distance;
+                if (distToCurrent < 10f)
+                    advanceWaypoint = true;
+                else if (_pathWaypoints.Count > 1)
+                {
+                    Vector2 toNext = _pathWaypoints[1] - currentBase;
+                    float distToNext = toNext.Length();
+                    if (distToNext < distToCurrent)
+                        advanceWaypoint = true; // already past current waypoint
+                }
+                if (advanceWaypoint)
+                {
+                    Vector2 reached = _targetPositionBase;
+                    _pathWaypoints.RemoveAt(0);
+                    if (_pathWaypoints.Count == 0)
+                    {
+                        SetBasePosition(reached);
+                        _pathWaypoints = null;
+                        _hasTarget = false;
+                    }
+                    else
+                    {
+                        _targetPositionBase = _pathWaypoints[0];
+                        direction = _targetPositionBase - currentBase;
+                        distance = direction.Length();
+                    }
+                }
+            }
+            else if (_pathWaypoints == null && distance < 2.0f)
             {
                 SetBasePosition(_targetPositionBase);
                 _hasTarget = false;
-                GD.Print($"Ego reached target at base: {_targetPositionBase}");
             }
-            else
+            if (_hasTarget)
             {
                 direction = direction.Normalized();
-                _currentDirection = DirectionToIndex(direction);
+                int newDir = DirectionToIndex(direction);
+                // Hysteresis: only change direction when it differs by 2+ steps (45°+) to avoid jittery flipping
+                int diff = Math.Abs(newDir - _currentDirection);
+                if (diff > 4) diff = 8 - diff;
+                if (diff > 1) _currentDirection = newDir;
+                // Tick walk animation at 10 FPS whenever we have a target (even if blocked this frame)
+                _walkFrameTimer += (float)delta;
+                float frameInterval = 1f / WalkAnimationFps;
+                if (_walkFrameTimer >= frameInterval)
+                {
+                    _walkFrameTimer -= frameInterval;
+                    _currentFrame = (_currentFrame + 1) % Cols;
+                }
                 float moveDist = MoveSpeed * (float)delta;
                 Vector2 newBase = currentBase + direction * moveDist;
                 float actualMove = 0f;
 
-                if (GetWalkableAtBase(newBase))
-                    actualMove = moveDist;
-                else if (moveDist > 0.5f)
+                // Try progressively smaller steps so we can squeeze through tight spots (e.g. near red obstacle corners)
+                float[] stepFractions = { 1f, 0.5f, 0.25f, 0.125f, 0.0625f };
+                foreach (float frac in stepFractions)
                 {
-                    float half = moveDist * 0.5f;
-                    newBase = currentBase + direction * half;
-                    if (GetWalkableAtBase(newBase))
-                        actualMove = half;
+                    float step = moveDist * frac;
+                    if (step < 0.1f) break;
+                    Vector2 tryBase = currentBase + direction * step;
+                    if (GetWalkableAtBase(tryBase))
+                    {
+                        actualMove = step;
+                        newBase = tryBase;
+                        break;
+                    }
                 }
                 if (actualMove <= 0f)
                 {
-                    // Direct (and half) step blocked: try sliding along X or Y so we don't get stuck on corners
-                    Vector2 stepX = currentBase + new Vector2(Mathf.Sign(direction.X) * moveDist, 0f);
-                    Vector2 stepY = currentBase + new Vector2(0f, Mathf.Sign(direction.Y) * moveDist);
-                    bool okX = GetWalkableAtBase(stepX);
-                    bool okY = GetWalkableAtBase(stepY);
-                    if (okX) { newBase = stepX; actualMove = moveDist; }
-                    else if (okY) { newBase = stepY; actualMove = moveDist; }
+                    // Direct step blocked: try sliding along X, Y, then half-steps and diagonal
+                    float sx = Mathf.Sign(direction.X) * moveDist;
+                    float sy = Mathf.Sign(direction.Y) * moveDist;
+                    Vector2 stepX = currentBase + new Vector2(sx, 0f);
+                    Vector2 stepY = currentBase + new Vector2(0f, sy);
+                    if (GetWalkableAtBase(stepX)) { newBase = stepX; actualMove = moveDist; }
+                    else if (GetWalkableAtBase(stepY)) { newBase = stepY; actualMove = moveDist; }
+                    if (actualMove <= 0f && moveDist >= 0.5f)
+                    {
+                        float hx = sx * 0.5f;
+                        float hy = sy * 0.5f;
+                        if (GetWalkableAtBase(currentBase + new Vector2(hx, 0f))) { newBase = currentBase + new Vector2(hx, 0f); actualMove = moveDist * 0.5f; }
+                        else if (GetWalkableAtBase(currentBase + new Vector2(0f, hy))) { newBase = currentBase + new Vector2(0f, hy); actualMove = moveDist * 0.5f; }
+                        else if (GetWalkableAtBase(currentBase + new Vector2(hx, hy))) { newBase = currentBase + new Vector2(hx, hy); actualMove = moveDist * 0.5f; }
+                    }
+                    // Try quarter steps along axes and diagonal when still stuck (tight corners)
+                    if (actualMove <= 0f && moveDist >= 0.25f)
+                    {
+                        float qx = sx * 0.25f;
+                        float qy = sy * 0.25f;
+                        if (GetWalkableAtBase(currentBase + new Vector2(qx, 0f))) { newBase = currentBase + new Vector2(qx, 0f); actualMove = moveDist * 0.25f; }
+                        else if (GetWalkableAtBase(currentBase + new Vector2(0f, qy))) { newBase = currentBase + new Vector2(0f, qy); actualMove = moveDist * 0.25f; }
+                        else if (GetWalkableAtBase(currentBase + new Vector2(qx, qy))) { newBase = currentBase + new Vector2(qx, qy); actualMove = moveDist * 0.25f; }
+                    }
+                    // Nudge toward next waypoint when stuck at a corner (e.g. red square entrance)
+                    if (actualMove <= 0f && _pathWaypoints != null && _pathWaypoints.Count > 1)
+                    {
+                        Vector2 toNext = _pathWaypoints[1] - currentBase;
+                        float len = toNext.Length();
+                        if (len > 0.01f)
+                        {
+                            Vector2 dirNext = toNext / len;
+                            float nudge = Mathf.Min(moveDist * 0.5f, len * 0.5f);
+                            if (nudge >= 0.1f && GetWalkableAtBase(currentBase + dirNext * nudge))
+                            {
+                                newBase = currentBase + dirNext * nudge;
+                                actualMove = nudge;
+                            }
+                        }
+                    }
+                    // Corner: if still stuck but very close to current waypoint, advance so next frame we move toward next segment
+                    if (actualMove <= 0f && _pathWaypoints != null && _pathWaypoints.Count > 1 && distance < 8f)
+                    {
+                        _pathWaypoints.RemoveAt(0);
+                        _targetPositionBase = _pathWaypoints[0];
+                    }
                 }
                 else
                     newBase = currentBase + direction * actualMove;
@@ -184,15 +303,20 @@ public partial class Ego : Node2D
                 if (actualMove > 0f)
                 {
                     SetBasePosition(newBase);
-                    _distanceMoved += actualMove;
-                    if (_distanceMoved >= 4f) { _distanceMoved -= 4f; _currentFrame = (_currentFrame + 1) % Cols; }
                     _stuckTimer = 0f;
                 }
                 else
                 {
                     _stuckTimer += (float)delta;
-                    if (_stuckTimer >= 0.4f)
+                    if (_stuckTimer >= 0.2f && OnStuckRepath != null && _pathWaypoints != null && _pathWaypoints.Count > 0)
                     {
+                        Vector2 finalTarget = _pathWaypoints[_pathWaypoints.Count - 1];
+                        if (OnStuckRepath(GetBasePosition(), finalTarget))
+                            _stuckTimer = 0f;
+                    }
+                    if (_stuckTimer >= 0.25f)
+                    {
+                        _pathWaypoints = null;
                         _hasTarget = false;
                         _stuckTimer = 0f;
                     }
@@ -202,7 +326,7 @@ public partial class Ego : Node2D
         else
         {
             _currentFrame = 0;
-            _distanceMoved = 0;
+            _walkFrameTimer = 0f;
         }
 
         if (_atlasTexture != null)

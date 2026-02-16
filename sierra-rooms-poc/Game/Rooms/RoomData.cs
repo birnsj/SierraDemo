@@ -78,6 +78,10 @@ public partial class HotspotData
     [JsonPropertyName("rect")]
     public RectData Rect { get; set; }
     
+    /// <summary>Polygon vertices in base coords. If null, derived from Rect. Editor uses these; save both for compat.</summary>
+    [JsonPropertyName("points")]
+    public Vector2Data[] Points { get; set; }
+    
     [JsonPropertyName("verbs")]
     public VerbActionsData Verbs { get; set; }
 }

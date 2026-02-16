@@ -13,6 +13,7 @@ public partial class RoomRuntime : Node2D
     private Sprite2D _foregroundSprite;  // For priority-based foreground rendering
     private Ego _ego;
     private Image _controlImage;
+    private AStar2D _astar; // Grid pathfinding; rebuilt when control map loads
     private Sprite2D _controlDebugSprite;
     private Image _priorityImage;
     private Sprite2D _priorityDebugSprite;
@@ -45,16 +46,28 @@ public partial class RoomRuntime : Node2D
     private int _selectedHotspotIndex = -1;
     private int _selectedExitIndex = -1;
     private bool _isResizing = false;
-    private string _resizeHandle = ""; // "tl", "tr", "bl", "br", "t", "b", "l", "r"
+    private string _resizeHandle = ""; // for exits only now
     private Vector2I _dragStartMouse = Vector2I.Zero;
-    private Vector2 _dragStartMouseLocalPixels = Vector2.Zero; // For 1:1 drag in pixel space
+    private Vector2 _dragStartMouseLocalPixels = Vector2.Zero;
     private RectData _dragStartRect;
+    // Polygon hotspot: vertex drag and add/delete
+    private int _draggingVertexIndex = -1;
+    private int _selectedVertexIndex = -1;
+    private Vector2 _dragStartVertexPosition; // base coords when started dragging vertex
+    private double _lastHotspotClickTime;
+    private Vector2I _lastHotspotClickPoint;
     private bool _hasUnsavedChanges = false;
     private bool _justSelected = false; // Track if we just selected to avoid immediate drag
     
     // Exit collision tracking
     private string _lastExitTriggered = "";
     private double _exitCooldownTimer = 0.0;
+
+    // Hotspot click: show description by the hotspot (not in message box)
+    private string _clickedHotspotDescription;
+    private Vector2 _clickedHotspotScreenPos;
+    private double _clickedHotspotDescriptionTime;
+    private const double ClickedDescriptionDuration = 6.0;
 
     // Backdrop toggle (T key): pic_base.png vs pic_base_large.png
     private string _roomPackagePath;
@@ -135,18 +148,45 @@ public partial class RoomRuntime : Node2D
 
     public override void _Input(InputEvent @event)
     {
-        // F1–F5: one mode active at a time; same key again closes that mode (all off)
         if (@event is InputEventKey keyEvent && keyEvent.Pressed && !keyEvent.Echo)
         {
-            int newMode = -1;
-            if (keyEvent.Keycode == Key.F1) newMode = 1;
-            else if (keyEvent.Keycode == Key.F2) newMode = 2;
-            else if (keyEvent.Keycode == Key.F3) newMode = 3;
-            else if (keyEvent.Keycode == Key.F4) newMode = 4;
-            else if (keyEvent.Keycode == Key.F5) newMode = 5;
-            if (newMode >= 0)
+            bool overlayOpen = IsAnyInputOverlayVisible();
+            // When a message box or edit dialog is open, only allow F-keys and Ctrl+S so we don't steal input from text fields
+            if (overlayOpen)
             {
-                _debugOverlayMode = (_debugOverlayMode == newMode) ? 0 : newMode;
+                int newMode = -1;
+                if (keyEvent.Keycode == Key.F1) newMode = 1;
+                else if (keyEvent.Keycode == Key.F2) newMode = 2;
+                else if (keyEvent.Keycode == Key.F3) newMode = 3;
+                else if (keyEvent.Keycode == Key.F4) newMode = 4;
+                else if (keyEvent.Keycode == Key.F5) newMode = 5;
+                if (newMode >= 0)
+                {
+                    _debugOverlayMode = (_debugOverlayMode == newMode) ? 0 : newMode;
+                    ApplyDebugMode();
+                    GD.Print($"Debug mode: {(_debugOverlayMode == 0 ? "OFF" : $"F{_debugOverlayMode}")}");
+                    if (_debugOverlayMode == 5)
+                        ShowMessage("F5: Click a hotspot to edit name and 3 descriptions. Enter saves.");
+                    return;
+                }
+                if (keyEvent.Keycode == Key.S && keyEvent.CtrlPressed && _showHotspotsExits && _hasUnsavedChanges)
+                {
+                    SaveRoomData();
+                    return;
+                }
+                return; // ignore all other keys when overlay is open
+            }
+
+            // F1–F5: one mode active at a time; same key again closes that mode (all off)
+            int newMode2 = -1;
+            if (keyEvent.Keycode == Key.F1) newMode2 = 1;
+            else if (keyEvent.Keycode == Key.F2) newMode2 = 2;
+            else if (keyEvent.Keycode == Key.F3) newMode2 = 3;
+            else if (keyEvent.Keycode == Key.F4) newMode2 = 4;
+            else if (keyEvent.Keycode == Key.F5) newMode2 = 5;
+            if (newMode2 >= 0)
+            {
+                _debugOverlayMode = (_debugOverlayMode == newMode2) ? 0 : newMode2;
                 ApplyDebugMode();
                 GD.Print($"Debug mode: {(_debugOverlayMode == 0 ? "OFF" : $"F{_debugOverlayMode}")}");
                 if (_debugOverlayMode == 5)
@@ -201,18 +241,21 @@ public partial class RoomRuntime : Node2D
                 {
                     _currentVerb = "look";
                     GD.Print($"Current verb: {_currentVerb}");
+                    if (_debugDrawNode != null) _debugDrawNode.QueueRedraw();
                     return;
                 }
                 if (keyEvent.Keycode == Key.Key2)
                 {
                     _currentVerb = "use";
                     GD.Print($"Current verb: {_currentVerb}");
+                    if (_debugDrawNode != null) _debugDrawNode.QueueRedraw();
                     return;
                 }
                 if (keyEvent.Keycode == Key.Key3)
                 {
                     _currentVerb = "talk";
                     GD.Print($"Current verb: {_currentVerb}");
+                    if (_debugDrawNode != null) _debugDrawNode.QueueRedraw();
                     return;
                 }
             }
@@ -222,6 +265,8 @@ public partial class RoomRuntime : Node2D
         {
             if (mouseButton.ButtonIndex == MouseButton.Left && mouseButton.Pressed)
             {
+                if (IsAnyInputOverlayVisible())
+                    return;
                 // Convert viewport mouse to room local space, then to base coords (so F4 hit-test matches cursor)
                 Vector2 screenPos = GetMouseLocalPosition();
                 Vector2 baseCoords = ScreenToRoomBase(screenPos);
@@ -254,38 +299,43 @@ public partial class RoomRuntime : Node2D
                 // Normal play: check hotspots then click-to-walk
                 if (CheckHotspots(clickPoint))
                     return;
+                _clickedHotspotDescription = null;
+                if (_debugDrawNode != null) _debugDrawNode.QueueRedraw();
                 HandleClickToWalk(clickPoint);
             }
             else if (mouseButton.ButtonIndex == MouseButton.Left && !mouseButton.Pressed)
             {
-                // Mouse released - stop resizing
+                if (_draggingVertexIndex >= 0)
+                {
+                    _draggingVertexIndex = -1;
+                    if (_debugDrawNode != null) _debugDrawNode.QueueRedraw();
+                }
                 if (_isResizing)
                 {
                     _isResizing = false;
                     _resizeHandle = "";
-                    if (_debugDrawNode != null)
-                    {
-                        _debugDrawNode.QueueRedraw();
-                    }
+                    if (_debugDrawNode != null) _debugDrawNode.QueueRedraw();
                 }
             }
             else if (mouseButton.ButtonIndex == MouseButton.Right && mouseButton.Pressed && (_showHotspotsExits || _showHotspotTextMode))
             {
-                // Right-click in F4/F5: deselect
                 _selectedHotspotIndex = -1;
                 _selectedExitIndex = -1;
+                _selectedVertexIndex = -1;
                 if (_debugDrawNode != null)
                     _debugDrawNode.QueueRedraw();
             }
         }
         
-        // Handle mouse motion for resizing only (move is click-to-place)
         if (@event is InputEventMouseMotion mouseMotion)
         {
-            if (_showHotspotsExits && _isResizing)
+            if (_showHotspotsExits && _draggingVertexIndex >= 0)
             {
-                HandleHotspotResize(mouseMotion);
+                HandleVertexDrag(mouseMotion);
+                return;
             }
+            if (_showHotspotsExits && _isResizing)
+                HandleHotspotResize(mouseMotion);
         }
     }
     
@@ -309,42 +359,80 @@ public partial class RoomRuntime : Node2D
             _debugDrawNode.DrawCircle(footSampleScreen, 2, Colors.Cyan);
         }
 
-        // Draw hotspots and exits when F4 or F5 overlay is on
+        // In normal play: when a hotspot was clicked, show its description in a message box by that hotspot
+        if (!_showHotspotsExits && !_showHotspotTextMode && !string.IsNullOrEmpty(_clickedHotspotDescription) && _roomData != null)
+        {
+            int descFontSize = Mathf.Clamp(24 + (int)(RenderScale * 3f), 32, 56);
+            Color descColor = new Color(1f, 1f, 0.95f);
+            string text = _clickedHotspotDescription.Length > 60 ? _clickedHotspotDescription.Substring(0, 57) + "..." : _clickedHotspotDescription;
+            var font = ThemeDB.FallbackFont;
+            Vector2 textSize = font.GetStringSize(text);
+            float scale = descFontSize / 16f;
+            float boxPadX = 12f;
+            float boxPadYTop = 18f;   // extra space above text so box top doesn't cut through (DrawString Y is near baseline)
+            float boxPadYBottom = 10f;
+            float boxH = textSize.Y * scale + boxPadYTop + boxPadYBottom;
+            Vector2 boxSize = new Vector2(textSize.X * scale + boxPadX * 2, boxH);
+            float roomW = _roomData.BaseSize.W * RenderScale;
+            float roomH = _roomData.BaseSize.H * RenderScale;
+            Vector2 boxPos = _clickedHotspotScreenPos - new Vector2(boxPadX, boxPadYTop);
+            boxPos.X = Mathf.Clamp(boxPos.X, 0, roomW - boxSize.X);
+            boxPos.Y = Mathf.Clamp(boxPos.Y, 0, roomH - boxSize.Y);
+            Vector2 textPos = boxPos + new Vector2(boxPadX, boxPadYTop + boxH * 0.2f + 10f);
+            Rect2 boxRect = new Rect2(boxPos, boxSize);
+            _debugDrawNode.DrawRect(boxRect, new Color(0.08f, 0.08f, 0.12f, 0.92f), true);
+            _debugDrawNode.DrawRect(boxRect, new Color(1f, 0.9f, 0.4f), false, 2);
+            DrawDebugTextOutlined(_debugDrawNode, textPos, text, descColor, descFontSize);
+        }
+
+        // Draw hotspots and exits when F4 or F5 overlay is on (editor: polygons + labels + handles)
         if ((_showHotspotsExits || _showHotspotTextMode) && _roomData != null)
         {
-            // Draw hotspots in yellow
+            // Draw hotspots as polygons
             if (_roomData.Hotspots != null)
             {
                 for (int i = 0; i < _roomData.Hotspots.Length; i++)
                 {
                     var hotspot = _roomData.Hotspots[i];
-                    var rect = new Rect2(
-                        hotspot.Rect.X * RenderScale,
-                        hotspot.Rect.Y * RenderScale,
-                        hotspot.Rect.W * RenderScale,
-                        hotspot.Rect.H * RenderScale
-                    );
-                    
-                    // Different color if selected
+                    var pts = GetHotspotPoints(hotspot);
+                    if (pts == null || pts.Length < 2) continue;
                     Color color = (i == _selectedHotspotIndex) ? Colors.Orange : Colors.Yellow;
                     float lineWidth = (i == _selectedHotspotIndex) ? 3 : 2;
-                    
-                    _debugDrawNode.DrawRect(rect, color, false, lineWidth);
-                    
-                    // Draw label
-                    _debugDrawNode.DrawString(ThemeDB.FallbackFont, 
-                        new Vector2(rect.Position.X, rect.Position.Y - 5), 
-                        hotspot.Id, 
-                        HorizontalAlignment.Left, 
-                        -1, 
-                        12, 
-                        color);
-                    
-                    // Draw resize handles only in F4 (not in F5 text mode)
-                    if (i == _selectedHotspotIndex && _showHotspotsExits)
+                    // Polygon outline
+                    for (int j = 0, k = pts.Length - 1; j < pts.Length; k = j++)
                     {
-                        DrawResizeHandles(rect);
+                        Vector2 a = new Vector2(pts[k].X, pts[k].Y) * RenderScale;
+                        Vector2 b = new Vector2(pts[j].X, pts[j].Y) * RenderScale;
+                        _debugDrawNode.DrawLine(a, b, color, lineWidth);
                     }
+                    // Label by object: top-left of hotspot, left-aligned; size scales with room
+                    float minX = pts[0].X, minY = pts[0].Y;
+                    foreach (var p in pts)
+                    {
+                        if (p.X < minX) minX = (float)p.X;
+                        if (p.Y < minY) minY = (float)p.Y;
+                    }
+                    float labelX = minX * RenderScale;
+                    float labelY = minY * RenderScale - 6f;
+                    int nameFontSize = Mathf.Clamp(12 + (int)(RenderScale * 1.5f), 16, 26);
+                    int descFontSize = Mathf.Clamp(10 + (int)(RenderScale * 1.2f), 14, 22);
+                    float lineAdvance = 2f + descFontSize * 1.1f;
+                    string nameText = hotspot.Id ?? "";
+                    if (!string.IsNullOrEmpty(nameText))
+                    {
+                        DrawDebugTextOutlined(_debugDrawNode, new Vector2(labelX, labelY), nameText, color, nameFontSize);
+                        labelY += lineAdvance;
+                    }
+                    string descText = GetHotspotVerbDescription(hotspot, _currentVerb);
+                    if (!string.IsNullOrEmpty(descText))
+                    {
+                        const int MaxDescChars = 50;
+                        if (descText.Length > MaxDescChars)
+                            descText = descText.Substring(0, MaxDescChars - 3) + "...";
+                        DrawDebugTextOutlined(_debugDrawNode, new Vector2(labelX, labelY), descText, color, descFontSize);
+                    }
+                    if (i == _selectedHotspotIndex && _showHotspotsExits)
+                        DrawVertexHandles(pts, _selectedVertexIndex);
                 }
             }
             
@@ -384,30 +472,47 @@ public partial class RoomRuntime : Node2D
                 }
             }
             
-            // Debug text: left side, small, sharp, black outline
+            // On-screen instructions: one block per mode, 2x larger, 10px lower so not cut off at top
             const float DebugTextLeft = 8f;
-            const int DebugFontSize = 11;
-            float debugY = 8f;
-            float debugLineHeight = 16f;
+            const int DebugFontSize = 28;
+            const int DebugFontSizeMode = 32;
+            float debugY = 18f;
+            float debugLineHeight = 36f;
+            float modeBlockGap = 12f;
 
             if (_showHotspotsExits && _hasUnsavedChanges)
             {
                 DrawDebugTextOutlined(_debugDrawNode, new Vector2(DebugTextLeft, debugY), "UNSAVED CHANGES - Press Ctrl+S to save", Colors.Yellow, DebugFontSize);
                 debugY += debugLineHeight;
             }
-            string modeText = _showHotspotTextMode
-                ? "F5 TEXT - Click hotspot to edit name + look/use/talk | Enter saves"
-                : "F4 SIZE - Select, move, resize | A=add Del=delete Ctrl+S=save";
-            DrawDebugTextOutlined(_debugDrawNode, new Vector2(DebugTextLeft, debugY), modeText, _showHotspotTextMode ? Colors.Cyan : Colors.White, DebugFontSize);
+
+            if (_showHotspotTextMode)
+            {
+                DrawDebugTextOutlined(_debugDrawNode, new Vector2(DebugTextLeft, debugY), "F5 — TEXT MODE", Colors.Cyan, DebugFontSizeMode);
+                debugY += debugLineHeight + modeBlockGap;
+                DrawDebugTextOutlined(_debugDrawNode, new Vector2(DebugTextLeft, debugY), "  Click hotspot → edit name, look, use, talk", Colors.Cyan, DebugFontSize);
+                debugY += debugLineHeight;
+                DrawDebugTextOutlined(_debugDrawNode, new Vector2(DebugTextLeft, debugY), "  Enter = save  |  Esc = close dialog", Colors.Cyan, DebugFontSize);
+            }
+            else if (_showHotspotsExits)
+            {
+                DrawDebugTextOutlined(_debugDrawNode, new Vector2(DebugTextLeft, debugY), "F4 — SHAPE MODE", Colors.White, DebugFontSizeMode);
+                debugY += debugLineHeight + modeBlockGap;
+                DrawDebugTextOutlined(_debugDrawNode, new Vector2(DebugTextLeft, debugY), "  Move: click shape or empty to move  |  Hold Ctrl = vertex mode", Colors.White, DebugFontSize);
+                debugY += debugLineHeight;
+                DrawDebugTextOutlined(_debugDrawNode, new Vector2(DebugTextLeft, debugY), "  Vertex (Ctrl): drag vertices, double-click edge to add point", Colors.White, DebugFontSize);
+                debugY += debugLineHeight;
+                DrawDebugTextOutlined(_debugDrawNode, new Vector2(DebugTextLeft, debugY), "  Del = delete vertex or hotspot  |  A = add  |  Ctrl+S = save", Colors.White, DebugFontSize);
+            }
         }
 
-        // Resolution indicator (same style: left, small, outlined)
+        // Resolution indicator (same style: left, outlined)
         if (_resolutionIndicatorTimer > 0 && _roomData != null)
         {
             const float DebugTextLeft = 8f;
-            const int DebugFontSize = 11;
-            float debugY = (_showHotspotsExits || _showHotspotTextMode) ? 28f : 8f;
-            float debugLineHeight = 14f;
+            const int DebugFontSize = 22;
+            float debugY = (_showHotspotsExits || _showHotspotTextMode) ? 120f : 18f;
+            float debugLineHeight = 26f;
 
             string backdropFile = _useLargeBackdrop ? "pic_base_large.png" : "pic_base.png";
             float currentScale = (float)_resolutionWidths[_resolutionMode] / _roomData.BaseSize.W;
@@ -437,30 +542,41 @@ public partial class RoomRuntime : Node2D
     
     private void DrawResizeHandles(Rect2 rect)
     {
-        // Scale handle size with render scale so they're visible at any resolution
         float handleSize = Mathf.Max(12, 5 * RenderScale);
         float half = handleSize / 2;
         Color fillColor = Colors.White;
         Color outlineColor = Colors.Black;
-        
         void DrawHandle(Vector2 center)
         {
             var r = new Rect2(center.X - half, center.Y - half, handleSize, handleSize);
             _debugDrawNode.DrawRect(r, outlineColor, false, 2);
             _debugDrawNode.DrawRect(r, fillColor, true);
         }
-        
-        // Corner handles
         DrawHandle(rect.Position);
         DrawHandle(new Vector2(rect.Position.X + rect.Size.X, rect.Position.Y));
         DrawHandle(new Vector2(rect.Position.X, rect.Position.Y + rect.Size.Y));
         DrawHandle(rect.Position + rect.Size);
-        
-        // Edge handles
         DrawHandle(new Vector2(rect.Position.X + rect.Size.X / 2, rect.Position.Y));
         DrawHandle(new Vector2(rect.Position.X + rect.Size.X / 2, rect.Position.Y + rect.Size.Y));
         DrawHandle(new Vector2(rect.Position.X, rect.Position.Y + rect.Size.Y / 2));
         DrawHandle(new Vector2(rect.Position.X + rect.Size.X, rect.Position.Y + rect.Size.Y / 2));
+    }
+
+    private void DrawVertexHandles(Vector2Data[] points, int selectedVertexIndex)
+    {
+        float handleSize = Mathf.Max(10, 4 * RenderScale);
+        float half = handleSize / 2;
+        for (int i = 0; i < points.Length; i++)
+        {
+            var p = points[i];
+            Vector2 center = new Vector2((float)p.X, (float)p.Y) * RenderScale;
+            var r = new Rect2(center.X - half, center.Y - half, handleSize, handleSize);
+            bool selected = (i == selectedVertexIndex);
+            Color fillColor = selected ? new Color(1f, 0.5f, 0f) : Colors.White;   // Orange = selected (Del to delete)
+            Color outlineColor = selected ? Colors.Orange : Colors.Black;
+            _debugDrawNode.DrawRect(r, outlineColor, false, selected ? 3 : 2);
+            _debugDrawNode.DrawRect(r, fillColor, true);
+        }
     }
     
     public override void _Process(double delta)
@@ -494,6 +610,19 @@ public partial class RoomRuntime : Node2D
         {
             _exitCooldownTimer -= delta;
         }
+
+        // Hotspot click description: hide after duration, keep redrawing while visible
+        if (!string.IsNullOrEmpty(_clickedHotspotDescription))
+        {
+            double now = Time.GetTicksMsec() / 1000.0;
+            if (now - _clickedHotspotDescriptionTime > ClickedDescriptionDuration)
+            {
+                _clickedHotspotDescription = null;
+                if (_debugDrawNode != null) _debugDrawNode.QueueRedraw();
+            }
+            else if (_debugDrawNode != null)
+                _debugDrawNode.QueueRedraw();
+        }
         
         // Update resolution indicator timer
         if (_resolutionIndicatorTimer > 0)
@@ -521,7 +650,7 @@ public partial class RoomRuntime : Node2D
         for (int i = 0; i < _roomData.Hotspots.Length; i++)
         {
             var hotspot = _roomData.Hotspots[i];
-            if (IsPointInRect(clickPoint, hotspot.Rect))
+            if (IsPointInHotspot(clickPoint, hotspot))
             {
                 string look = hotspot.Verbs?.Look?.Value ?? "";
                 string use = hotspot.Verbs?.Use?.Value ?? "";
@@ -561,26 +690,48 @@ public partial class RoomRuntime : Node2D
         return false;
     }
     
-    /// <summary>Try to start editing a hotspot or exit (selection, dragging, resizing). Only used in F4 mode.</summary>
+    /// <summary>Try to start editing a hotspot or exit (vertex drag, add point, select, move). Only used in F4 mode. Hold Ctrl = vertex mode (no move).</summary>
     private bool TryStartHotspotEdit(Vector2I clickPoint, Vector2 clickLocalPixels)
     {
-        // First check if clicking on resize handles of selected item
-        if (_selectedHotspotIndex >= 0 && _roomData.Hotspots != null && _selectedHotspotIndex < _roomData.Hotspots.Length)
+        double now = Time.GetTicksMsec() / 1000.0;
+        bool doubleClick = (now - _lastHotspotClickTime < 0.5) && (clickPoint - _lastHotspotClickPoint).LengthSquared() < 900;
+        bool vertexMode = Input.IsKeyPressed(Key.Ctrl);
+
+        // 1) Vertex mode (Ctrl held): vertex hit -> drag; double-click edge -> add vertex. Only when Ctrl is down.
+        if (vertexMode && _selectedHotspotIndex >= 0 && _roomData?.Hotspots != null && _selectedHotspotIndex < _roomData.Hotspots.Length)
         {
             var hotspot = _roomData.Hotspots[_selectedHotspotIndex];
-            string handle = GetResizeHandle(clickPoint, hotspot.Rect);
-            if (handle != "")
+            var pts = GetHotspotPoints(hotspot);
+            if (pts != null)
             {
-                _isResizing = true;
-                _resizeHandle = handle;
-                _dragStartMouse = clickPoint;
-                _dragStartMouseLocalPixels = clickLocalPixels;
-                _dragStartRect = hotspot.Rect;
-                GD.Print($"Started resizing hotspot '{hotspot.Id}' with handle '{handle}'");
-                return true;
+                int vi = GetVertexAtPoint(clickPoint, pts);
+                if (vi >= 0)
+                {
+                    _draggingVertexIndex = vi;
+                    _selectedVertexIndex = vi;
+                    _dragStartVertexPosition = new Vector2((float)pts[vi].X, (float)pts[vi].Y);
+                    _dragStartMouse = clickPoint;
+                    _dragStartMouseLocalPixels = clickLocalPixels;
+                    _lastHotspotClickTime = now;
+                    _lastHotspotClickPoint = clickPoint;
+                    if (_debugDrawNode != null) _debugDrawNode.QueueRedraw();
+                    return true;
+                }
+                if (doubleClick)
+                {
+                    int edgeIndex = GetEdgeAtPoint(clickPoint, pts);
+                    if (edgeIndex >= 0)
+                    {
+                        AddVertexToHotspotEdge(_selectedHotspotIndex, edgeIndex, clickPoint);
+                        _lastHotspotClickTime = 0;
+                        if (_debugDrawNode != null) _debugDrawNode.QueueRedraw();
+                        return true;
+                    }
+                }
             }
         }
-        
+
+        // 2) Exit resize handles (exits stay rect-based)
         if (_selectedExitIndex >= 0 && _roomData.Exits != null && _selectedExitIndex < _roomData.Exits.Length)
         {
             var exit = _roomData.Exits[_selectedExitIndex];
@@ -592,24 +743,50 @@ public partial class RoomRuntime : Node2D
                 _dragStartMouse = clickPoint;
                 _dragStartMouseLocalPixels = clickLocalPixels;
                 _dragStartRect = exit.Rect;
-                GD.Print($"Started resizing exit '{exit.Id}' with handle '{handle}'");
+                if (_debugDrawNode != null) _debugDrawNode.QueueRedraw();
                 return true;
             }
         }
-        
-        // Check if clicking on a hotspot
+
+        // 3) Click on hotspot body. Move mode only when Ctrl not held: select or move whole polygon. (Vertex actions are in block 1.)
         if (_roomData?.Hotspots != null)
         {
-            for (int i = _roomData.Hotspots.Length - 1; i >= 0; i--) // Reverse order for top-to-bottom selection
+            for (int i = _roomData.Hotspots.Length - 1; i >= 0; i--)
             {
                 var hotspot = _roomData.Hotspots[i];
-                if (IsPointInRect(clickPoint, hotspot.Rect))
+                if (IsPointInHotspot(clickPoint, hotspot))
                 {
+                    _selectedVertexIndex = -1;
+                    if (vertexMode)
+                    {
+                        // Vertex mode: only change selection, never move
+                        if (_selectedHotspotIndex != i)
+                        {
+                            _selectedHotspotIndex = i;
+                            _selectedExitIndex = -1;
+                            GD.Print($"Selected hotspot: {hotspot.Id} (index {i})");
+                        }
+                        _lastHotspotClickTime = now;
+                        _lastHotspotClickPoint = clickPoint;
+                        if (_debugDrawNode != null) _debugDrawNode.QueueRedraw();
+                        return true;
+                    }
+                    var pts = GetHotspotPoints(hotspot);
+                    if (_selectedHotspotIndex == i && doubleClick && pts != null)
+                    {
+                        int edgeIndex = GetEdgeAtPoint(clickPoint, pts);
+                        if (edgeIndex >= 0)
+                        {
+                            AddVertexToHotspotEdge(i, edgeIndex, clickPoint);
+                            _lastHotspotClickTime = 0;
+                            if (_debugDrawNode != null) _debugDrawNode.QueueRedraw();
+                            return true;
+                        }
+                    }
                     if (_selectedHotspotIndex == i)
                     {
-                        // Same hotspot selected: move it to click
                         MoveHotspotToPoint(_selectedHotspotIndex, clickPoint);
-                        GD.Print($"Moved hotspot: {hotspot.Id} to {clickPoint}");
+                        GD.Print($"Moved hotspot: {hotspot.Id}");
                     }
                     else
                     {
@@ -617,14 +794,15 @@ public partial class RoomRuntime : Node2D
                         _selectedExitIndex = -1;
                         GD.Print($"Selected hotspot: {hotspot.Id} (index {i})");
                     }
-                    
+                    _lastHotspotClickTime = now;
+                    _lastHotspotClickPoint = clickPoint;
                     if (_debugDrawNode != null) _debugDrawNode.QueueRedraw();
                     return true;
                 }
             }
         }
-        
-        // Check if clicking on an exit
+
+        // 4) Click on exit body
         if (_roomData?.Exits != null)
         {
             for (int i = _roomData.Exits.Length - 1; i >= 0; i--)
@@ -633,53 +811,82 @@ public partial class RoomRuntime : Node2D
                 if (IsPointInRect(clickPoint, exit.Rect))
                 {
                     if (_selectedExitIndex == i)
-                    {
                         MoveExitToPoint(_selectedExitIndex, clickPoint);
-                        GD.Print($"Moved exit: {exit.Id} to {clickPoint}");
-                    }
                     else
                     {
                         _selectedExitIndex = i;
                         _selectedHotspotIndex = -1;
-                        GD.Print($"Selected exit: {exit.Id} (index {i})");
                     }
-                    
+                    _lastHotspotClickTime = now;
+                    _lastHotspotClickPoint = clickPoint;
                     if (_debugDrawNode != null) _debugDrawNode.QueueRedraw();
                     return true;
                 }
             }
         }
-        
-        // Clicked empty: if something selected, move it to click; else deselect
-        if (_selectedHotspotIndex >= 0 && _roomData?.Hotspots != null && _selectedHotspotIndex < _roomData.Hotspots.Length)
+
+        // 5) Clicked empty: move selected hotspot/exit to click (move mode only; vertex mode just deselects)
+        if (!vertexMode && _selectedHotspotIndex >= 0 && _roomData?.Hotspots != null && _selectedHotspotIndex < _roomData.Hotspots.Length)
         {
             MoveHotspotToPoint(_selectedHotspotIndex, clickPoint);
+            _selectedVertexIndex = -1;
             if (_debugDrawNode != null) _debugDrawNode.QueueRedraw();
             return true;
         }
-        if (_selectedExitIndex >= 0 && _roomData?.Exits != null && _selectedExitIndex < _roomData.Exits.Length)
+        if (!vertexMode && _selectedExitIndex >= 0 && _roomData?.Exits != null && _selectedExitIndex < _roomData.Exits.Length)
         {
             MoveExitToPoint(_selectedExitIndex, clickPoint);
             if (_debugDrawNode != null) _debugDrawNode.QueueRedraw();
             return true;
         }
-        
+
         _selectedHotspotIndex = -1;
         _selectedExitIndex = -1;
+        _selectedVertexIndex = -1;
+        _lastHotspotClickTime = now;
+        _lastHotspotClickPoint = clickPoint;
         if (_debugDrawNode != null) _debugDrawNode.QueueRedraw();
         return false;
     }
     
     private void MoveHotspotToPoint(int index, Vector2I centerBase)
     {
-        var r = _roomData.Hotspots[index].Rect;
-        int newX = Mathf.Clamp(centerBase.X - r.W / 2, 0, _roomData.BaseSize.W - r.W);
-        int newY = Mathf.Clamp(centerBase.Y - r.H / 2, 0, _roomData.BaseSize.H - r.H);
-        _roomData.Hotspots[index].Rect.X = newX;
-        _roomData.Hotspots[index].Rect.Y = newY;
+        var hotspot = _roomData.Hotspots[index];
+        var pts = GetHotspotPoints(hotspot);
+        if (pts == null || pts.Length == 0) return;
+        float cx = 0, cy = 0;
+        foreach (var p in pts) { cx += (float)p.X; cy += (float)p.Y; }
+        cx /= pts.Length;
+        cy /= pts.Length;
+        float dx = centerBase.X - cx;
+        float dy = centerBase.Y - cy;
+        if (hotspot.Points == null) hotspot.Points = (Vector2Data[])pts.Clone();
+        for (int i = 0; i < hotspot.Points.Length; i++)
+        {
+            float x = Mathf.Clamp((float)hotspot.Points[i].X + dx, 0, _roomData.BaseSize.W - 1);
+            float y = Mathf.Clamp((float)hotspot.Points[i].Y + dy, 0, _roomData.BaseSize.H - 1);
+            hotspot.Points[i].X = x;
+            hotspot.Points[i].Y = y;
+        }
+        UpdateHotspotRectFromPoints(hotspot);
         _hasUnsavedChanges = true;
     }
     
+    private void AddVertexToHotspotEdge(int hotspotIndex, int edgeIndex, Vector2I positionBase)
+    {
+        if (_roomData?.Hotspots == null || hotspotIndex < 0 || hotspotIndex >= _roomData.Hotspots.Length) return;
+        var hotspot = _roomData.Hotspots[hotspotIndex];
+        var pts = GetHotspotPoints(hotspot);
+        if (pts == null || edgeIndex < 0 || edgeIndex > pts.Length) return;
+        if (hotspot.Points == null) hotspot.Points = (Vector2Data[])pts.Clone();
+        var list = new List<Vector2Data>(hotspot.Points);
+        list.Insert(edgeIndex, new Vector2Data { X = Mathf.Clamp(positionBase.X, 0, _roomData.BaseSize.W - 1), Y = Mathf.Clamp(positionBase.Y, 0, _roomData.BaseSize.H - 1) });
+        hotspot.Points = list.ToArray();
+        UpdateHotspotRectFromPoints(hotspot);
+        _hasUnsavedChanges = true;
+        GD.Print($"Added vertex to hotspot '{hotspot.Id}' (double-click edge to add)");
+    }
+
     private void MoveExitToPoint(int index, Vector2I centerBase)
     {
         var r = _roomData.Exits[index].Rect;
@@ -721,7 +928,22 @@ public partial class RoomRuntime : Node2D
         return "";
     }
     
-    /// <summary>Handle resizing of selected hotspot/exit (move is click-to-place).</summary>
+    private void HandleVertexDrag(InputEventMouseMotion mouseMotion)
+    {
+        if (_draggingVertexIndex < 0 || _selectedHotspotIndex < 0 || _roomData?.Hotspots == null ||
+            _selectedHotspotIndex >= _roomData.Hotspots.Length) return;
+        var hotspot = _roomData.Hotspots[_selectedHotspotIndex];
+        if (hotspot.Points == null || _draggingVertexIndex >= hotspot.Points.Length) return;
+        Vector2 currentBase = ScreenToRoomBase(GetMouseLocalPosition());
+        float x = Mathf.Clamp(currentBase.X, 0, _roomData.BaseSize.W - 1);
+        float y = Mathf.Clamp(currentBase.Y, 0, _roomData.BaseSize.H - 1);
+        hotspot.Points[_draggingVertexIndex].X = x;
+        hotspot.Points[_draggingVertexIndex].Y = y;
+        UpdateHotspotRectFromPoints(hotspot);
+        _hasUnsavedChanges = true;
+    }
+
+    /// <summary>Handle resizing of selected exit (hotspots use vertex drag).</summary>
     private void HandleHotspotResize(InputEventMouseMotion mouseMotion)
     {
         Vector2 currentPixels = GetMouseLocalPosition();
@@ -796,12 +1018,7 @@ public partial class RoomRuntime : Node2D
             newRect.X = Mathf.Clamp(newRect.X, 0, _roomData.BaseSize.W - newRect.W);
             newRect.Y = Mathf.Clamp(newRect.Y, 0, _roomData.BaseSize.H - newRect.H);
             
-            if (_selectedHotspotIndex >= 0 && _roomData.Hotspots != null && _selectedHotspotIndex < _roomData.Hotspots.Length)
-            {
-                _roomData.Hotspots[_selectedHotspotIndex].Rect = newRect;
-                _hasUnsavedChanges = true;
-            }
-            else if (_selectedExitIndex >= 0 && _roomData.Exits != null && _selectedExitIndex < _roomData.Exits.Length)
+            if (_selectedExitIndex >= 0 && _roomData.Exits != null && _selectedExitIndex < _roomData.Exits.Length)
             {
                 _roomData.Exits[_selectedExitIndex].Rect = newRect;
                 _hasUnsavedChanges = true;
@@ -814,21 +1031,22 @@ public partial class RoomRuntime : Node2D
         }
     }
     
-    /// <summary>Add a new hotspot with a default box; select it so it can be moved/resized with handles.</summary>
+    /// <summary>Add a new hotspot as a default quad; select it for vertex editing.</summary>
     private void AddNewHotspot()
     {
         int w = 60;
         int h = 40;
         int x = Mathf.Clamp((_roomData.BaseSize.W - w) / 2, 0, _roomData.BaseSize.W - w);
         int y = Mathf.Clamp((_roomData.BaseSize.H - h) / 2, 0, _roomData.BaseSize.H - h);
-        
+        var rect = new RectData { X = x, Y = y, W = w, H = h };
         int n = (_roomData.Hotspots?.Length ?? 0) + 1;
         string id = $"hotspot_{n}";
         string actionText = "Something.";
         var newHotspot = new HotspotData
         {
             Id = id,
-            Rect = new RectData { X = x, Y = y, W = w, H = h },
+            Rect = rect,
+            Points = RectToPoints(rect),
             Verbs = new VerbActionsData
             {
                 Look = new VerbActionData { Type = "text", Value = actionText },
@@ -848,9 +1066,26 @@ public partial class RoomRuntime : Node2D
         GD.Print($"Added hotspot '{id}' (press A again to add more, move/resize with handles, Del to remove, Ctrl+S to save)");
     }
     
-    /// <summary>Delete the selected hotspot or exit</summary>
+    /// <summary>Delete selected vertex (if one selected) or the selected hotspot/exit.</summary>
     private void DeleteSelectedHotspotOrExit()
     {
+        if (_selectedVertexIndex >= 0 && _selectedHotspotIndex >= 0 && _roomData?.Hotspots != null &&
+            _selectedHotspotIndex < _roomData.Hotspots.Length)
+        {
+            var hotspot = _roomData.Hotspots[_selectedHotspotIndex];
+            if (hotspot.Points != null && hotspot.Points.Length > 3 && _selectedVertexIndex < hotspot.Points.Length)
+            {
+                var list = new List<Vector2Data>(hotspot.Points);
+                list.RemoveAt(_selectedVertexIndex);
+                hotspot.Points = list.ToArray();
+                UpdateHotspotRectFromPoints(hotspot);
+                _selectedVertexIndex = -1;
+                _hasUnsavedChanges = true;
+                GD.Print($"Deleted vertex from hotspot '{hotspot.Id}' (min 3 points)");
+                if (_debugDrawNode != null) _debugDrawNode.QueueRedraw();
+                return;
+            }
+        }
         if (_selectedHotspotIndex >= 0 && _roomData.Hotspots != null && _selectedHotspotIndex < _roomData.Hotspots.Length)
         {
             var deletedId = _roomData.Hotspots[_selectedHotspotIndex].Id;
@@ -858,12 +1093,10 @@ public partial class RoomRuntime : Node2D
             newList.RemoveAt(_selectedHotspotIndex);
             _roomData.Hotspots = newList.ToArray();
             _selectedHotspotIndex = -1;
+            _selectedVertexIndex = -1;
             _hasUnsavedChanges = true;
             GD.Print($"Deleted hotspot: {deletedId}");
-            if (_debugDrawNode != null)
-            {
-                _debugDrawNode.QueueRedraw();
-            }
+            if (_debugDrawNode != null) _debugDrawNode.QueueRedraw();
         }
         else if (_selectedExitIndex >= 0 && _roomData.Exits != null && _selectedExitIndex < _roomData.Exits.Length)
         {
@@ -892,7 +1125,8 @@ public partial class RoomRuntime : Node2D
         }
         
         string realPath = ProjectSettings.GlobalizePath(_roomPackagePath);
-        
+        foreach (var h in _roomData.Hotspots ?? Array.Empty<HotspotData>())
+            UpdateHotspotRectFromPoints(h);
         var options = new JsonSerializerOptions
         {
             PropertyNameCaseInsensitive = true,
@@ -929,11 +1163,9 @@ public partial class RoomRuntime : Node2D
         for (int i = 0; i < _roomData.Hotspots.Length; i++)
         {
             var hotspot = _roomData.Hotspots[i];
-            if (IsPointInRect(clickPoint, hotspot.Rect))
+            if (IsPointInHotspot(clickPoint, hotspot))
             {
                 GD.Print($"Clicked hotspot: {hotspot.Id} with verb: {_currentVerb}");
-                
-                // Get action for current verb
                 VerbActionData? action = _currentVerb switch
                 {
                     "look" => hotspot.Verbs.Look,
@@ -941,16 +1173,20 @@ public partial class RoomRuntime : Node2D
                     "talk" => hotspot.Verbs.Talk,
                     _ => null
                 };
-                
-                if (action != null && action.Type == "text")
+                string message = (action != null && action.Type == "text") ? action.Value : $"You can't {_currentVerb} that.";
+                var pts = GetHotspotPoints(hotspot);
+                float cx = clickPoint.X;
+                float minY = clickPoint.Y;
+                if (pts != null && pts.Length > 0)
                 {
-                    ShowMessage(action.Value);
+                    cx = 0; minY = (float)pts[0].Y;
+                    foreach (var p in pts) { cx += (float)p.X; if (p.Y < minY) minY = (float)p.Y; }
+                    cx /= pts.Length;
                 }
-                else
-                {
-                    ShowMessage($"You can't {_currentVerb} that.");
-                }
-                
+                _clickedHotspotDescription = message ?? "";
+                _clickedHotspotScreenPos = new Vector2(cx * RenderScale, minY * RenderScale - 12f);
+                _clickedHotspotDescriptionTime = Time.GetTicksMsec() / 1000.0;
+                if (_debugDrawNode != null) _debugDrawNode.QueueRedraw();
                 return true;
             }
         }
@@ -1116,8 +1352,13 @@ public partial class RoomRuntime : Node2D
         
         if (_ego != null)
         {
-            // Pass clamped base coords to ego
-            _ego.SetTarget(new Vector2(clampedTarget.X, clampedTarget.Y));
+            Vector2 egoBase = GetEgoBasePosition();
+            Vector2 targetBase = new Vector2(clampedTarget.X, clampedTarget.Y);
+            List<Vector2> path = ComputePath(egoBase, targetBase);
+            if (path != null && path.Count > 0)
+                _ego.SetPath(path);
+            else
+                _ego.SetTarget(targetBase);
         }
     }
     
@@ -1127,7 +1368,139 @@ public partial class RoomRuntime : Node2D
         return point.X >= rect.X && point.X < rect.X + rect.W &&
                point.Y >= rect.Y && point.Y < rect.Y + rect.H;
     }
+
+    /// <summary>Check if point is inside polygon (ray-cast). Points in base coords.</summary>
+    private static bool IsPointInPolygon(Vector2I point, Vector2Data[] points)
+    {
+        if (points == null || points.Length < 3) return false;
+        float px = point.X;
+        float py = point.Y;
+        bool inside = false;
+        int n = points.Length;
+        for (int i = 0, j = n - 1; i < n; j = i++)
+        {
+            float xi = points[i].X, yi = points[i].Y;
+            float xj = points[j].X, yj = points[j].Y;
+            if (((yi > py) != (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi) + xi))
+                inside = !inside;
+        }
+        return inside;
+    }
+
+    /// <summary>Get polygon points for hotspot (always returns Points or builds from Rect).</summary>
+    private static Vector2Data[] GetHotspotPoints(HotspotData hotspot)
+    {
+        if (hotspot.Points != null && hotspot.Points.Length >= 3) return hotspot.Points;
+        if (hotspot.Rect != null) return RectToPoints(hotspot.Rect);
+        return null;
+    }
+
+    private static Vector2Data[] RectToPoints(RectData r)
+    {
+        return new[]
+        {
+            new Vector2Data { X = r.X, Y = r.Y },
+            new Vector2Data { X = r.X + r.W, Y = r.Y },
+            new Vector2Data { X = r.X + r.W, Y = r.Y + r.H },
+            new Vector2Data { X = r.X, Y = r.Y + r.H }
+        };
+    }
+
+    /// <summary>Update Rect to bounding box of Points (for serialization compat).</summary>
+    private static void UpdateHotspotRectFromPoints(HotspotData hotspot)
+    {
+        var pts = hotspot.Points;
+        if (pts == null || pts.Length == 0) return;
+        float minX = pts[0].X, minY = pts[0].Y, maxX = pts[0].X, maxY = pts[0].Y;
+        for (int i = 1; i < pts.Length; i++)
+        {
+            minX = Mathf.Min(minX, pts[i].X);
+            minY = Mathf.Min(minY, pts[i].Y);
+            maxX = Mathf.Max(maxX, pts[i].X);
+            maxY = Mathf.Max(maxY, pts[i].Y);
+        }
+        hotspot.Rect = new RectData
+        {
+            X = Mathf.FloorToInt(minX),
+            Y = Mathf.FloorToInt(minY),
+            W = Mathf.CeilToInt(maxX - minX),
+            H = Mathf.CeilToInt(maxY - minY)
+        };
+    }
+
+    /// <summary>After load: ensure every hotspot has Points (from Rect if needed).</summary>
+    private void NormalizeHotspotPoints()
+    {
+        if (_roomData?.Hotspots == null) return;
+        foreach (var h in _roomData.Hotspots)
+        {
+            if (h.Points == null && h.Rect != null)
+                h.Points = RectToPoints(h.Rect);
+        }
+    }
+
+    private bool IsPointInHotspot(Vector2I point, HotspotData hotspot)
+    {
+        var pts = GetHotspotPoints(hotspot);
+        return pts != null && IsPointInPolygon(point, pts);
+    }
+
+    private static string GetHotspotVerbDescription(HotspotData hotspot, string verb)
+    {
+        if (hotspot?.Verbs == null) return "";
+        VerbActionData action = verb switch
+        {
+            "look" => hotspot.Verbs.Look,
+            "use" => hotspot.Verbs.Use,
+            "talk" => hotspot.Verbs.Talk,
+            _ => null
+        };
+        return action?.Value?.Trim() ?? "";
+    }
+
+    private const float VertexHandleRadiusBase = 8f;
+    private static int GetVertexAtPoint(Vector2I clickBase, Vector2Data[] points)
+    {
+        if (points == null) return -1;
+        float cx = clickBase.X, cy = clickBase.Y;
+        for (int i = 0; i < points.Length; i++)
+        {
+            float dx = cx - (float)points[i].X;
+            float dy = cy - (float)points[i].Y;
+            if (dx * dx + dy * dy <= VertexHandleRadiusBase * VertexHandleRadiusBase)
+                return i;
+        }
+        return -1;
+    }
+
+    private static int GetEdgeAtPoint(Vector2I clickBase, Vector2Data[] points, float maxDistBase = 28f)
+    {
+        if (points == null || points.Length < 2) return -1;
+        float px = clickBase.X, py = clickBase.Y;
+        int n = points.Length;
+        for (int i = 0, j = n - 1; i < n; j = i++)
+        {
+            float ax = (float)points[j].X, ay = (float)points[j].Y;
+            float bx = (float)points[i].X, by = (float)points[i].Y;
+            float t = Mathf.Clamp(((px - ax) * (bx - ax) + (py - ay) * (by - ay)) / (Mathf.Max(0.001f, (bx - ax) * (bx - ax) + (by - ay) * (by - ay))), 0f, 1f);
+            float projX = ax + t * (bx - ax);
+            float projY = ay + t * (by - ay);
+            float distSq = (px - projX) * (px - projX) + (py - projY) * (py - projY);
+            if (distSq <= maxDistBase * maxDistBase)
+                return i;
+        }
+        return -1;
+    }
     
+    /// <summary>True if any message box or edit dialog is open; room clicks should be ignored so editing isn't disrupted.</summary>
+    private bool IsAnyInputOverlayVisible()
+    {
+        return (_messageBox != null && _messageBox.IsVisible) ||
+               (_hotspotEditDialog != null && _hotspotEditDialog.IsVisible) ||
+               (_exitEditDialog != null && _exitEditDialog.IsVisible) ||
+               (_textInputDialog != null && _textInputDialog.IsVisible);
+    }
+
     /// <summary>Show a message in the message box</summary>
     private void ShowMessage(string message)
     {
@@ -1215,6 +1588,7 @@ public partial class RoomRuntime : Node2D
             PropertyNameCaseInsensitive = true
         };
         _roomData = JsonSerializer.Deserialize<RoomData>(jsonText, options);
+        NormalizeHotspotPoints();
 
         GD.Print($"Loaded room: {_roomData.DisplayName} (ID: {_roomData.Id})");
         GD.Print($"Base size: {_roomData.BaseSize.W}x{_roomData.BaseSize.H}");
@@ -1513,6 +1887,7 @@ public partial class RoomRuntime : Node2D
         }
         
         _isWalkableDebugCount = 0; // Reset so next 5 IsWalkable calls are logged
+        BuildPathfindingGraph();
         GD.Print($"Control map loaded: {controlFile} ({_controlImage.GetWidth()}x{_controlImage.GetHeight()})");
         GD.Print($"Walkability rule: luma >= {_roomData.ControlRule.WalkableIfLumaGte}, invert: {_roomData.ControlRule.Invert}");
         
@@ -1552,7 +1927,84 @@ public partial class RoomRuntime : Node2D
         AddChild(_controlDebugSprite);
 
         _isWalkableDebugCount = 0;
+        BuildPathfindingGraph();
         GD.Print($"Created default all-walkable control map: {_roomData.BaseSize.W}x{_roomData.BaseSize.H}");
+    }
+
+    private void BuildPathfindingGraph()
+    {
+        _astar = new AStar2D();
+        if (_controlImage == null || _roomData?.ControlRule == null) return;
+        int w = _roomData.BaseSize.W;
+        int h = _roomData.BaseSize.H;
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++)
+            {
+                if (!IsWalkable(new Vector2I(x, y))) continue;
+                int id = y * w + x;
+                _astar.AddPoint(id, new Vector2(x + 0.5f, y + 0.5f), 1f);
+            }
+        int[] dx = { 1, -1, 0, 0 };
+        int[] dy = { 0, 0, 1, -1 };
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++)
+            {
+                if (!IsWalkable(new Vector2I(x, y))) continue;
+                int id = y * w + x;
+                for (int d = 0; d < 4; d++)
+                {
+                    int nx = x + dx[d], ny = y + dy[d];
+                    if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
+                    if (!IsWalkable(new Vector2I(nx, ny))) continue;
+                    int nid = ny * w + nx;
+                    if (!_astar.ArePointsConnected(id, nid))
+                        _astar.ConnectPoints(id, nid, true);
+                }
+            }
+    }
+
+    /// <summary>Compute path (base coords). Returns simplified corner waypoints or empty.</summary>
+    public List<Vector2> ComputePath(Vector2 fromBase, Vector2 toBase)
+    {
+        var result = new List<Vector2>();
+        if (_roomData == null) return result;
+        int w = _roomData.BaseSize.W;
+        int h = _roomData.BaseSize.H;
+        var fromCell = new Vector2I(Mathf.Clamp(Mathf.FloorToInt(fromBase.X), 0, w - 1), Mathf.Clamp(Mathf.FloorToInt(fromBase.Y), 0, h - 1));
+        var toCell = new Vector2I(Mathf.Clamp(Mathf.FloorToInt(toBase.X), 0, w - 1), Mathf.Clamp(Mathf.FloorToInt(toBase.Y), 0, h - 1));
+        if (_astar == null)
+        {
+            if (IsWalkable(toCell)) result.Add(toBase);
+            return result;
+        }
+        if (!IsWalkable(fromCell)) fromCell = ClampToNearestWalkable(fromCell, 30);
+        if (!IsWalkable(toCell)) toCell = ClampToNearestWalkable(toCell, 60);
+        if (!IsWalkable(fromCell) || !IsWalkable(toCell)) return result;
+        int fromId = fromCell.Y * w + fromCell.X;
+        int toId = toCell.Y * w + toCell.X;
+        if (!_astar.HasPoint(fromId) || !_astar.HasPoint(toId)) return result;
+        if (fromId == toId) { result.Add(toBase); return result; }
+        var pointPath = _astar.GetPointPath(fromId, toId);
+        if (pointPath == null || pointPath.Length == 0) return result;
+        for (int i = 0; i < pointPath.Length; i++)
+            result.Add(pointPath[i]);
+        if (result.Count > 0) result[result.Count - 1] = toBase;
+        return SimplifyPath(result);
+    }
+
+    /// <summary>Keep only corners (direction changes) so fewer waypoints = smoother animation.</summary>
+    private static List<Vector2> SimplifyPath(List<Vector2> path)
+    {
+        if (path == null || path.Count <= 2) return path;
+        var outList = new List<Vector2> { path[0] };
+        for (int i = 1; i < path.Count - 1; i++)
+        {
+            Vector2 d1 = (path[i] - path[i - 1]).Normalized();
+            Vector2 d2 = (path[i + 1] - path[i]).Normalized();
+            if (d1.Dot(d2) < 0.94f) outList.Add(path[i]); // only keep sharper corners (~20°+) to reduce corner waypoints
+        }
+        outList.Add(path[path.Count - 1]);
+        return outList;
     }
     
     private void LoadPriorityMap(string roomPackagePath)
@@ -1708,10 +2160,8 @@ public partial class RoomRuntime : Node2D
             return;
         
         // Get ego position in base coords
-        Vector2I egoBasePos = new Vector2I(
-            Mathf.FloorToInt(_ego.Position.X / RenderScale),
-            Mathf.FloorToInt(_ego.Position.Y / RenderScale)
-        );
+        Vector2 basePos = _ego.BasePosition;
+        Vector2I egoBasePos = new Vector2I(Mathf.FloorToInt(basePos.X), Mathf.FloorToInt(basePos.Y));
         
         // Apply foot offset from room.json
         Vector2I footSampleCoord = new Vector2I(
@@ -1875,8 +2325,14 @@ public partial class RoomRuntime : Node2D
         
         // Set position in scaled coords (base * renderScale)
         Vector2 baseSpawnPos = new Vector2(_roomData.Spawn.X, _roomData.Spawn.Y);
-        _ego.Position = baseSpawnPos * _roomData.RenderScale;
+        _ego.SetInitialBasePosition(baseSpawnPos);
         _ego.IsWalkableAtBase = IsWalkable;
+        _ego.OnStuckRepath = (fromBase, toBase) =>
+        {
+            List<Vector2> path = ComputePath(fromBase, toBase);
+            if (path != null && path.Count > 0) { _ego.SetPath(path); return true; }
+            return false;
+        };
         GD.Print($"Ego spawned at base coords: {baseSpawnPos}, screen coords: {_ego.Position}");
         AddChild(_ego);
     }
@@ -1901,8 +2357,7 @@ public partial class RoomRuntime : Node2D
     public Vector2 GetEgoBasePosition()
     {
         if (_ego == null) return Vector2.Zero;
-        // Ego.Position is in screen coords, convert to base
-        return _ego.Position / RenderScale;
+        return _ego.BasePosition;
     }
     
     // Priority debug info getters
