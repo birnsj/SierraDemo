@@ -188,6 +188,15 @@ public partial class EgoSettingsDialog : CanvasLayer
         ego.SlideFraction = Mathf.Clamp(data.SlideFraction, 0f, 1f);
     }
 
+    /// <summary>Load user://ego_settings.json and apply MoveSpeed/SlideFraction to ego. Call when ego is spawned so saved settings apply from game start.</summary>
+    public static void ApplySavedSettingsTo(Ego ego)
+    {
+        if (ego == null) return;
+        var loaded = LoadFromFile();
+        if (loaded != null)
+            ApplyToEgo(ego, loaded);
+    }
+
     private static EgoSettingsData LoadFromFile()
     {
         if (!FileAccess.FileExists(SettingsPath))

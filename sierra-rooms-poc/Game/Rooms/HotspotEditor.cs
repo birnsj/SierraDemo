@@ -64,7 +64,7 @@ public class HotspotEditor
         double now = Time.GetTicksMsec() / 1000.0;
         bool doubleClick = (now - _lastHotspotClickTime < 0.5) && (clickPoint - _lastHotspotClickPoint).LengthSquared() < 900;
 
-        // F5 text mode: clicking hotspot/exit opens dialog (return so RoomRuntime opens it)
+        // F5 text mode: clicking hotspot/exit opens dialog; clicking empty adds default hotspot and opens dialog
         if (isTextEditMode)
         {
             if (_roomData.Hotspots != null)
@@ -91,7 +91,11 @@ public class HotspotEditor
                     }
                 }
             }
-            return new HotspotEditResult { ResultKind = HotspotEditResult.Kind.Handled };
+            // F5 click on empty: add default "nothing here" hotspot at click and open its settings
+            int newIdx = AddHotspotAtPoint(clickPoint, queueRedraw);
+            _lastHotspotClickTime = now;
+            _lastHotspotClickPoint = clickPoint;
+            return new HotspotEditResult { ResultKind = HotspotEditResult.Kind.OpenHotspotDialog, Index = newIdx };
         }
 
         // 1) Vertex mode (F4): vertex hit on any hotspot -> select that vertex (and hotspot); double-click edge -> add vertex
@@ -238,21 +242,16 @@ public class HotspotEditor
             }
         }
 
-        // 5) Clicked empty: with Alt hold-and-drag hotspot; without Alt deselect
+        // 5) Clicked empty (F4 only): with Alt hold-and-drag hotspot; otherwise deselect
         if (!vertexMode && _selectedHotspotIndex >= 0 && _roomData.Hotspots != null && _selectedHotspotIndex < _roomData.Hotspots.Length)
         {
             if (altHeld)
             {
                 _hotspotDragPending = true;
                 _lastMouseBase = new Vector2(clickPoint.X, clickPoint.Y);
+                queueRedraw?.Invoke();
+                return new HotspotEditResult { ResultKind = HotspotEditResult.Kind.Handled };
             }
-            else
-            {
-                _selectedHotspotIndex = -1;
-                _selectedVertexIndex = -1;
-            }
-            queueRedraw?.Invoke();
-            return new HotspotEditResult { ResultKind = HotspotEditResult.Kind.Handled };
         }
         if (!vertexMode && _selectedExitIndex >= 0 && _roomData.Exits != null && _selectedExitIndex < _roomData.Exits.Length)
         {
@@ -377,7 +376,24 @@ public class HotspotEditor
         int w = 60, h = 40;
         int x = Mathf.Clamp((_roomData.BaseSize.W - w) / 2, 0, _roomData.BaseSize.W - w);
         int y = Mathf.Clamp((_roomData.BaseSize.H - h) / 2, 0, _roomData.BaseSize.H - h);
-        var rect = new RectData { X = x, Y = y, W = w, H = h };
+        AddHotspotAtRect(new RectData { X = x, Y = y, W = w, H = h }, "Something.", "Something.", "Something.", queueRedraw);
+    }
+
+    /// <summary>Add a default "nothing here" hotspot at the given position. Returns the new hotspot index. Saved to room.json on Ctrl+S.</summary>
+    public int AddHotspotAtPoint(Vector2I clickPoint, Action queueRedraw)
+    {
+        int w = 48, h = 32;
+        int x = Mathf.Clamp(clickPoint.X - w / 2, 0, _roomData.BaseSize.W - w);
+        int y = Mathf.Clamp(clickPoint.Y - h / 2, 0, _roomData.BaseSize.H - h);
+        return AddHotspotAtRect(new RectData { X = x, Y = y, W = w, H = h },
+            "Nothing of interest here.",
+            "Nothing happens.",
+            "There's no one to talk to.",
+            queueRedraw);
+    }
+
+    private int AddHotspotAtRect(RectData rect, string lookText, string useText, string talkText, Action queueRedraw)
+    {
         int n = (_roomData.Hotspots?.Length ?? 0) + 1;
         string id = $"hotspot_{n}";
         var newHotspot = new HotspotData
@@ -387,19 +403,22 @@ public class HotspotEditor
             Points = RectToPoints(rect),
             Verbs = new VerbActionsData
             {
-                Look = new VerbActionData { Type = "text", Value = "Something." },
-                Use = new VerbActionData { Type = "text", Value = "Something." },
-                Talk = new VerbActionData { Type = "text", Value = "Something." }
+                Look = new VerbActionData { Type = "text", Value = lookText },
+                Use = new VerbActionData { Type = "text", Value = useText },
+                Talk = new VerbActionData { Type = "text", Value = talkText }
             }
         };
         var list = new List<HotspotData>(_roomData.Hotspots ?? Array.Empty<HotspotData>());
         list.Add(newHotspot);
         _roomData.Hotspots = list.ToArray();
-        _selectedHotspotIndex = list.Count - 1;
+        int newIndex = list.Count - 1;
+        _selectedHotspotIndex = newIndex;
         _selectedExitIndex = -1;
+        _selectedVertexIndex = -1;
         HasUnsavedChanges = true;
         queueRedraw?.Invoke();
         GD.Print($"Added hotspot '{id}'");
+        return newIndex;
     }
 
     public void DeleteSelected(Action queueRedraw)

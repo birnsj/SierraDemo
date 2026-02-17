@@ -98,6 +98,17 @@ public partial class Ego : Node2D
     /// <summary>Current position in base coords (smooth, used for pathfinding).</summary>
     public Vector2 BasePosition => _exactBasePosition;
 
+    /// <summary>Face toward a point in base coords (e.g. hotspot). No movement; updates direction and idle frame.</summary>
+    public void FaceToward(Vector2 targetBase)
+    {
+        Vector2 dir = targetBase - _exactBasePosition;
+        if (dir.LengthSquared() < 0.01f) return;
+        _currentDirection = DirectionToIndex(dir.Normalized());
+        _currentFrame = 0;
+        _walkFrameTimer = 0f;
+        UpdateAtlasRegion();
+    }
+
     /// <summary>Set position when spawning; use this so exact base position stays in sync.</summary>
     public void SetInitialBasePosition(Vector2 basePos)
     {

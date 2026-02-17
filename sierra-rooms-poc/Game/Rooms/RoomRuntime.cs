@@ -32,8 +32,8 @@ public partial class RoomRuntime : Node2D
     // Single active mode: 0=None/game, 1=F1, 2=F2, 3=F3, 4=F4, 5=F5. Entering a mode fully closes the previous one. Esc = mode 0 (game).
     private int _debugOverlayMode = 0;
 
-    // Verb state
-    private string _currentVerb = "look";  // Default verb
+    // Verb state: 1=Walk (default), 2=Look, 3=Use, 4=Talk
+    private string _currentVerb = "walk";
     
     // Debug state
     private bool _showDebugDraw = false;
@@ -113,6 +113,13 @@ public partial class RoomRuntime : Node2D
 
     private void ApplyDebugMode()
     {
+        // Close all settings/edit panels when mode changes
+        _egoSettingsDialog?.Hide();
+        _controlMapEditPanel?.Hide();
+        _showControlMapSettingsPanel = false;
+        _hotspotEditDialog?.Hide();
+        _exitEditDialog?.Hide();
+
         _debugOverlay?.SetF1Visible(_debugOverlayMode == 1);
         _showDebugDraw = _debugOverlayMode == 2;
         if (_controlDebugSprite != null)
@@ -280,28 +287,50 @@ public partial class RoomRuntime : Node2D
                 _hotspotEditor?.AddHotspot(() => _debugDrawNode?.QueueRedraw());
                 return;
             }
+            // F5: D = add default "nothing here" hotspot at room center and open its settings (Esc to close dialog)
+            if (_showHotspotTextMode && keyEvent.Keycode == Key.D && _roomData != null && _hotspotEditor != null)
+            {
+                void QueueRedraw() => _debugDrawNode?.QueueRedraw();
+                Vector2I center = new Vector2I(_roomData.BaseSize.W / 2, _roomData.BaseSize.H / 2);
+                int idx = _hotspotEditor.AddHotspotAtPoint(center, QueueRedraw);
+                if (_roomData.Hotspots != null && idx >= 0 && idx < _roomData.Hotspots.Length)
+                {
+                    var h = _roomData.Hotspots[idx];
+                    string look = h.Verbs?.Look?.Value ?? "";
+                    string use = h.Verbs?.Use?.Value ?? "";
+                    string talk = h.Verbs?.Talk?.Value ?? "";
+                    _hotspotEditDialog.ShowHotspot(h.Id ?? "", look, use, talk, (name, newLook, newUse, newTalk) =>
+                    {
+                        _hotspotEditor?.ApplyHotspotEdit(idx, name, newLook, newUse, newTalk, QueueRedraw);
+                    });
+                }
+                return;
+            }
 
-            // Verb keys 1/2/3 (play mode only, not when any edit panel is up)
+            // Verb keys 1=Walk, 2=Look, 3=Use, 4=Talk (play mode only, not when any edit panel is up)
             if (!IsGameEditModeActive())
             {
                 if (keyEvent.Keycode == Key.Key1)
                 {
-                    _currentVerb = "look";
-                    GD.Print($"Current verb: {_currentVerb}");
+                    _currentVerb = "walk";
                     if (_debugDrawNode != null) _debugDrawNode.QueueRedraw();
                     return;
                 }
                 if (keyEvent.Keycode == Key.Key2)
                 {
-                    _currentVerb = "use";
-                    GD.Print($"Current verb: {_currentVerb}");
+                    _currentVerb = "look";
                     if (_debugDrawNode != null) _debugDrawNode.QueueRedraw();
                     return;
                 }
                 if (keyEvent.Keycode == Key.Key3)
                 {
+                    _currentVerb = "use";
+                    if (_debugDrawNode != null) _debugDrawNode.QueueRedraw();
+                    return;
+                }
+                if (keyEvent.Keycode == Key.Key4)
+                {
                     _currentVerb = "talk";
-                    GD.Print($"Current verb: {_currentVerb}");
                     if (_debugDrawNode != null) _debugDrawNode.QueueRedraw();
                     return;
                 }
@@ -366,12 +395,34 @@ public partial class RoomRuntime : Node2D
                 
                 GD.Print($"RAW Click - Local: {screenPos}, BaseCoords: {baseCoords}, RenderScale: {RenderScale}");
                 
-                // Normal play: check hotspots then click-to-walk (pass exact base coords so ego stops at cursor)
-                if (CheckHotspots(clickPoint))
-                    return;
+                // Normal play: Walk = walk to click; Look/Use/Talk = show hotspot message + face if hotspot, else open dialog to add default
                 _clickedHotspotDescription = null;
+                if (_currentVerb == "walk")
+                {
+                    HandleClickToWalk(baseCoords);
+                }
+                else
+                {
+                    if (CheckHotspots(clickPoint) && _ego != null)
+                    {
+                        _ego.FaceToward(baseCoords);
+                    }
+                    else
+                    {
+                        // No hotspot at click: show default description at click position (no dialog)
+                        string defaultDesc = _currentVerb switch
+                        {
+                            "look" => "Nothing of interest here.",
+                            "use" => "Nothing happens.",
+                            "talk" => "There's no one to talk to.",
+                            _ => "Nothing there."
+                        };
+                        _clickedHotspotDescription = defaultDesc;
+                        _clickedHotspotScreenPos = new Vector2(baseCoords.X * RenderScale, baseCoords.Y * RenderScale - 12f);
+                        _clickedHotspotDescriptionTime = Time.GetTicksMsec() / 1000.0;
+                    }
+                }
                 if (_debugDrawNode != null) _debugDrawNode.QueueRedraw();
-                HandleClickToWalk(baseCoords);
             }
             else if (mouseButton.ButtonIndex == MouseButton.Left && !mouseButton.Pressed)
             {
@@ -402,10 +453,10 @@ public partial class RoomRuntime : Node2D
     
     private void OnDebugDraw()
     {
-        // Upper left: current verb (1=Look, 2=Use, 3=Talk) when in play mode
+        // Upper left: current verb (1=Walk, 2=Look, 3=Use, 4=Talk) when in play mode
         if (!IsGameEditModeActive() && _roomData != null)
         {
-            string verbName = _currentVerb switch { "look" => "Look", "use" => "Use", "talk" => "Talk", _ => _currentVerb };
+            string verbName = _currentVerb switch { "walk" => "Walk", "look" => "Look", "use" => "Use", "talk" => "Talk", _ => _currentVerb };
             int verbFontSize = Mathf.Clamp(20 + (int)(RenderScale * 1.5f), 22, 36);
             DrawDebugTextOutlined(_debugDrawNode, new Vector2(12f, 20f), verbName, new Color(0.95f, 0.95f, 1f), verbFontSize);
         }
@@ -765,7 +816,7 @@ public partial class RoomRuntime : Node2D
                     "look" => hotspot.Verbs.Look,
                     "use" => hotspot.Verbs.Use,
                     "talk" => hotspot.Verbs.Talk,
-                    _ => null
+                    _ => null  // walk = no action
                 };
                 string message = (action != null && action.Type == "text") ? action.Value : $"You can't {_currentVerb} that.";
                 var pts = GetHotspotPoints(hotspot);
@@ -994,7 +1045,7 @@ public partial class RoomRuntime : Node2D
 
     private static string GetHotspotVerbDescription(HotspotData hotspot, string verb)
     {
-        if (hotspot?.Verbs == null) return "";
+        if (hotspot?.Verbs == null || verb == "walk") return "";
         VerbActionData action = verb switch
         {
             "look" => hotspot.Verbs.Look,
@@ -2069,6 +2120,7 @@ public partial class RoomRuntime : Node2D
             if (path != null && path.Count > 0) { _ego.SetPath(path); _targetFromWasd = false; return true; }
             return false;
         };
+        EgoSettingsDialog.ApplySavedSettingsTo(_ego);
         GD.Print($"Ego spawned at base coords: {baseSpawnPos}, screen coords: {_ego.Position}");
         AddChild(_ego);
     }

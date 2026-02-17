@@ -208,6 +208,47 @@
           "value": "Fuck off dude!"
         }
       }
+    },
+    {
+      "id": "Nothing",
+      "rect": {
+        "x": 136,
+        "y": 79,
+        "w": 48,
+        "h": 32
+      },
+      "points": [
+        {
+          "x": 136,
+          "y": 79
+        },
+        {
+          "x": 184,
+          "y": 79
+        },
+        {
+          "x": 184,
+          "y": 111
+        },
+        {
+          "x": 136,
+          "y": 111
+        }
+      ],
+      "verbs": {
+        "look": {
+          "type": "text",
+          "value": "Nothing of interest here."
+        },
+        "use": {
+          "type": "text",
+          "value": "Nothing happens."
+        },
+        "talk": {
+          "type": "text",
+          "value": "There\u0027s no one to talk to."
+        }
+      }
     }
   ]
 }

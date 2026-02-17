@@ -61,7 +61,7 @@ public partial class DebugOverlay : CanvasLayer
         var lines = new System.Collections.Generic.List<string>
         {
             $"Room: {roomData.Id}",
-            $"Verb: {currentVerb} [1=LOOK, 2=USE, 3=TALK]",
+            $"Verb: {currentVerb} [1=WALK, 2=LOOK, 3=USE, 4=TALK]",
             $"Mouse: ({Mathf.FloorToInt(mouseRoomCoords.X)}, {Mathf.FloorToInt(mouseRoomCoords.Y)}) Walkable: {mouseWalkable}",
             $"Ego: ({Mathf.FloorToInt(egoBasePos.X)}, {Mathf.FloorToInt(egoBasePos.Y)})",
             $"FootSample: ({footSampleCoord.X}, {footSampleCoord.Y})",
