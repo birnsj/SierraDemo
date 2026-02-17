@@ -78,7 +78,7 @@ public partial class DebugOverlay : CanvasLayer
             lines.Add($"Clamped: ({clamped.X}, {clamped.Y})");
         }
 
-        lines.Add("[F1] Toggle | [F2] Control | [F3] Priority | [F4] Hotspots [F5] Text");
+        lines.Add("[F1] Toggle | [F2] Control | [F3] Priority | [F4] Hotspots [F5] Text [F6] Ego");
         lines.Add("[F4] A=Add Click=Move Handles=Resize Del=Delete Ctrl+S=Save");
 
         // Size panel to surround the text (measure longest line; GetStringSize uses default 16px so scale for our FontSize)

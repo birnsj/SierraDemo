@@ -1,4 +1,4 @@
-[gd_scene load_steps=8 format=3 uid="uid://dv56yjwgmq7xw"]
+[gd_scene load_steps=10 format=3 uid="uid://dv56yjwgmq7xw"]
 
 [ext_resource type="Script" path="res://Game/Core/GameMain.cs" id="1_main"]
 [ext_resource type="PackedScene" uid="uid://bx3n5m8qvwk2f" path="res://Game/Rooms/RoomRuntime.tscn" id="2_room"]
@@ -8,6 +8,8 @@
 [ext_resource type="Script" path="res://Game/UI/HotspotEditDialog.cs" id="6_hotspotedit"]
 [ext_resource type="Script" path="res://Game/UI/ExitEditDialog.cs" id="7_exitedit"]
 [ext_resource type="PackedScene" uid="uid://c5x8jm3qwk7pq" path="res://Game/UI/UIBar.tscn" id="5_uibar"]
+[ext_resource type="Script" path="res://Game/UI/EgoSettingsDialog.cs" id="8_ego"]
+[ext_resource type="Script" path="res://Game/UI/ControlMapEditPanel.cs" id="9_control"]
 
 [node name="GameMain" type="Node2D"]
 script = ExtResource("1_main")
@@ -32,3 +34,9 @@ script = ExtResource("6_hotspotedit")
 
 [node name="ExitEditDialog" type="CanvasLayer" parent="."]
 script = ExtResource("7_exitedit")
+
+[node name="EgoSettingsDialog" type="CanvasLayer" parent="."]
+script = ExtResource("8_ego")
+
+[node name="ControlMapEditPanel" type="CanvasLayer" parent="."]
+script = ExtResource("9_control")

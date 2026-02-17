@@ -15,6 +15,8 @@ public partial class RoomData
     public float RenderScale { get; set; }
     public Vector2Data Spawn { get; set; }
     public ControlRuleData ControlRule { get; set; }
+    /// <summary>Optional. If set (at least 3 points), walkability is point-in-polygon; otherwise control image is used.</summary>
+    public Vector2Data[] WalkablePolygon { get; set; }
     public int FootOffsetY { get; set; }
     public ExitData[] Exits { get; set; }
     public HotspotData[] Hotspots { get; set; }
@@ -53,6 +55,10 @@ public partial class ControlRuleData
 {
     public float WalkableIfLumaGte { get; set; }
     public bool Invert { get; set; }
+    /// <summary>If &gt; 0, thin walkable lines are dilated by this many cells so the player can walk on them (e.g. lines around a red box). 1 = 3x3 expansion.</summary>
+    public int WalkableExpandPixels { get; set; }
+    /// <summary>Cells around a point that must be walkable for pathfinding/movement. If not set, default 3 is used.</summary>
+    public int? WalkablePadding { get; set; }
 }
 
 public partial class ExitData
